@@ -1,0 +1,39 @@
+using System.ComponentModel.DataAnnotations;
+
+namespace HRIS.Api.Features.Employees.DTOs;
+
+public class CreateEmployeeRequest
+{
+    [Range(1, long.MaxValue, ErrorMessage = "UserId must be a valid value.")]
+    public long UserId { get; set; }
+
+    [Required]
+    [MaxLength(100)]
+    public string Position { get; set; } = default!;
+
+    [Required]
+    [MaxLength(100)]
+    public string Department { get; set; } = default!;
+
+    [Required]
+    [MaxLength(50)]
+    public string EmploymentType { get; set; } = default!;
+
+    [MaxLength(20)]
+    public string? ContactNumber { get; set; }
+
+    [MaxLength(150)]
+    public string? AddressLine1 { get; set; }
+
+    [MaxLength(150)]
+    public string? AddressLine2 { get; set; }
+
+    [MaxLength(100)]
+    public string? City { get; set; }
+
+    [MaxLength(100)]
+    public string? Province { get; set; }
+
+    [MaxLength(20)]
+    public string? ZipCode { get; set; }
+}
