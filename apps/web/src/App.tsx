@@ -47,8 +47,9 @@ import ClearanceForm from "./pages/clearance/ClearanceForm";
 // HRIS System
 import HRISSystem from "./pages/HRISSystem";
 
-// Admin Settings
+// Settings
 import AdminSettings from "./pages/admin/AdminSettings";
+import UserSettings from "./pages/user/UserSettings";
 
 import "./App.css";
 
@@ -83,6 +84,12 @@ function AdminOnly({ children }: { children: React.ReactNode }) {
   }
 
   return <>{children}</>;
+}
+
+function SettingsPage() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === "ADMIN" || user?.role === "SUPER_ADMIN";
+  return isAdmin ? <AdminSettings /> : <UserSettings />;
 }
 
 export default function App() {
@@ -152,7 +159,6 @@ export default function App() {
               </AdminOnly>
             }
           />
-          {/* ✅ NEW: Admin Daily Accomplishment Reports */}
           <Route
             path="daily-accomplishment-reports"
             element={
@@ -185,14 +191,9 @@ export default function App() {
               </AdminOnly>
             }
           />
-          <Route
-            path="settings"
-            element={
-              <AdminOnly>
-                <AdminSettings />
-              </AdminOnly>
-            }
-          />
+
+          {/* Settings — Admin sees AdminSettings, User sees UserSettings */}
+          <Route path="settings" element={<SettingsPage />} />
 
           {/* Shared routes */}
           <Route path="compliance" element={<GovernmentCompliance />} />
