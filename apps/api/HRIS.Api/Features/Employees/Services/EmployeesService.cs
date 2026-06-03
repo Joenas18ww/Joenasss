@@ -192,6 +192,30 @@ public class EmployeesService
             .FirstOrDefaultAsync(ct);
     }
 
+    public async Task<EmployeeDto?> GetByUserIdAsync(long userId, CancellationToken ct = default)
+    {
+        return await _db.Employees
+            .AsNoTracking()
+            .Include(e => e.User)
+            .Where(e => e.UserId == userId)
+            .Select(ToDtoExpr())
+            .FirstOrDefaultAsync(ct);
+    }
+
+    public async Task<(bool ok, string? error, EmployeeDto? employee)> UpdateByUserIdAsync(
+        long userId,
+        UpdateEmployeeRequest req,
+        CancellationToken ct = default)
+    {
+        var entity = await _db.Employees
+            .Include(e => e.User)
+            .FirstOrDefaultAsync(e => e.UserId == userId, ct);
+
+        if (entity is null) return (false, "Employee not found.", null);
+
+        return await UpdateAsync(entity.Id, req, ct);
+    }
+
     public async Task<List<EmployeeDocumentDto>> GetDocumentsAsync(
         Guid employeeId,
         CancellationToken ct = default)
@@ -564,7 +588,9 @@ public class EmployeesService
 
         var httpContext = _httpContextAccessor.HttpContext;
 
-        if (httpContext is not null)
+        var statusChanged = previousIsActive != entity.IsActive;
+
+        if (httpContext is not null && statusChanged)
         {
             var fullName = BuildDisplayName(
                 entity.FirstName,
@@ -572,23 +598,13 @@ public class EmployeesService
                 entity.LastName,
                 entity.User?.Suffix);
 
-            var statusChanged = previousIsActive != entity.IsActive;
-
-            var action = statusChanged
-                ? "EMPLOYEE_STATUS_UPDATED"
-                : "EMPLOYEE_UPDATED";
-
-            var summary = statusChanged
-                ? $"Updated employee status {entity.EmployeeNumber} ({fullName}) -> {(entity.IsActive ? "Active" : "Inactive")}"
-                : $"Updated employee {entity.EmployeeNumber} ({fullName})";
-
             var log = _activityLogger.Build(
                 user: httpContext.User,
-                action: action,
+                action: "EMPLOYEE_STATUS_UPDATED",
                 module: "EMPLOYEES",
                 targetType: "Employee",
                 targetId: entity.Id.ToString(),
-                summary: summary,
+                summary: $"Updated employee status {entity.EmployeeNumber} ({fullName}) -> {(entity.IsActive ? "Active" : "Inactive")}",
                 ipAddress: httpContext.Connection.RemoteIpAddress?.ToString(),
                 userAgent: httpContext.Request.Headers["User-Agent"].ToString()
             );

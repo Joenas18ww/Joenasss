@@ -87,6 +87,10 @@ export function formatActionLabel(action: string) {
       return 'Updated Employee';
     case 'EMPLOYEE_STATUS_UPDATED':
       return 'Updated Status';
+    case 'PROFILE_UPDATED':
+      return 'Updated Profile';
+    case 'DOCUMENT_UPLOADED':
+      return 'Uploaded Document';
     default:
       return action
         .toLowerCase()
@@ -120,6 +124,10 @@ export function getBadgeClassName(action: string) {
       return 'bg-amber-50 text-amber-700 border border-amber-100';
     case 'EMPLOYEE_STATUS_UPDATED':
       return 'bg-violet-50 text-violet-700 border border-violet-100';
+    case 'PROFILE_UPDATED':
+      return 'bg-sky-50 text-sky-700 border border-sky-100';
+    case 'DOCUMENT_UPLOADED':
+      return 'bg-teal-50 text-teal-700 border border-teal-100';
     default:
       return 'bg-gray-50 text-gray-700 border border-gray-100';
   }

@@ -8,7 +8,9 @@ import { useAuth } from '../../context/AuthContext';
 import { createPortal } from 'react-dom';
 import { toast } from 'sonner';
 import { Calendar, Search } from 'lucide-react';
-import { getBadgeClassName, formatActionLabel } from '../../lib/activityLog.utils';
+import { getBadgeClassName, formatActionLabel, formatDatePart, formatTimePart, formatDateFilterPart } from '../../lib/activityLog.utils';
+import { getUserActivityLogs, createActivityLog, type ActivityLogItemDto } from '../../lib/activityLogs';
+import { apiRequest } from '../../lib/api';
 
 type SettingsTab = 'profile' | 'security' | 'documents' | 'logs';
 
@@ -346,30 +348,86 @@ const employmentStatusOptions = ['Active', 'Inactive'];
 const PROFILE_STORAGE_KEY     = 'settings.profileForm';
 
 const ProfileTab = ({ user }: { user: any }) => {
-    const initialForm: ProfileForm = {
-        fullName:         user?.fullName         ?? '',
-        email:            user?.email            ?? '',
-        contactNumber:    user?.contactNumber    ?? '',
-        addressLine1:     user?.addressLine1     ?? '',
-        addressLine2:     user?.addressLine2     ?? '',
-        city:             user?.city             ?? '',
-        province:         user?.province         ?? '',
-        zipCode:          user?.zipCode          ?? '',
-        position:         user?.position         ?? '',
-        employmentType:   user?.employmentType   ?? '',
-        department:       user?.department       ?? '',
-        employmentStatus: user?.employmentStatus ?? 'Active',
-        sssNumber:        user?.sssNumber        ?? '',
-        pagIbigNumber:    user?.pagIbigNumber    ?? '',
-        philHealthNumber: user?.philHealthNumber ?? '',
-        tinNumber:        user?.tinNumber        ?? '',
+    const emptyForm: ProfileForm = {
+        fullName:         '',
+        email:            '',
+        contactNumber:    '',
+        addressLine1:     '',
+        addressLine2:     '',
+        city:             '',
+        province:         '',
+        zipCode:          '',
+        position:         '',
+        employmentType:   '',
+        department:       '',
+        employmentStatus: 'Active',
+        sssNumber:        '',
+        pagIbigNumber:    '',
+        philHealthNumber: '',
+        tinNumber:        '',
     };
 
-    const [form,        setForm]        = useState<ProfileForm>(initialForm);
-    const [snapshot,    setSnapshot]    = useState<ProfileForm>(initialForm);
+    const [form,        setForm]        = useState<ProfileForm>(emptyForm);
+    const [snapshot,    setSnapshot]    = useState<ProfileForm>(emptyForm);
     const [isEditing,   setIsEditing]   = useState(false);
+    const [isLoading,   setIsLoading]   = useState(true);
     const [avatar,      setAvatar]      = useState<AvatarState>({ url: null });
     const avatarInputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+        const fetchProfile = async () => {
+            try {
+                setIsLoading(true);
+                const data = await apiRequest<any>('/employees/me');
+                const loaded: ProfileForm = {
+                    fullName:         data.fullName         ?? '',
+                    email:            data.email            ?? '',
+                    contactNumber:    data.contactNumber    ?? '',
+                    addressLine1:     data.addressLine1     ?? '',
+                    addressLine2:     data.addressLine2     ?? '',
+                    city:             data.city             ?? '',
+                    province:         data.province         ?? '',
+                    zipCode:          data.zipCode          ?? '',
+                    position:         data.position         ?? '',
+                    employmentType:   data.employmentType   ?? '',
+                    department:       data.department       ?? '',
+                    employmentStatus: data.isActive ? 'Active' : 'Inactive',
+                    sssNumber:        data.sssNumber        ?? '',
+                    pagIbigNumber:    data.pagIbigNumber    ?? '',
+                    philHealthNumber: data.philHealthNumber ?? '',
+                    tinNumber:        data.tinNumber        ?? '',
+                };
+                setForm(loaded);
+                setSnapshot(loaded);
+            } catch {
+                // fallback sa user object kung may error
+                const fallback: ProfileForm = {
+                    fullName:         user?.fullName         ?? '',
+                    email:            user?.email            ?? '',
+                    contactNumber:    '',
+                    addressLine1:     '',
+                    addressLine2:     '',
+                    city:             '',
+                    province:         '',
+                    zipCode:          '',
+                    position:         '',
+                    employmentType:   '',
+                    department:       '',
+                    employmentStatus: 'Active',
+                    sssNumber:        '',
+                    pagIbigNumber:    '',
+                    philHealthNumber: '',
+                    tinNumber:        '',
+                };
+                setForm(fallback);
+                setSnapshot(fallback);
+            } finally {
+                setIsLoading(false);
+            }
+        };
+
+        void fetchProfile();
+    }, [user]);
 
     const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -392,8 +450,7 @@ const ProfileTab = ({ user }: { user: any }) => {
         setIsEditing(false);
     };
 
-    const handleSave = () => {
-        // TODO: connect to API — updateEmployee(user.employeeId, form)
+    const handleSave = async () => {
         const hasChanges = JSON.stringify(form) !== JSON.stringify(snapshot);
 
         if (!hasChanges) {
@@ -402,10 +459,60 @@ const ProfileTab = ({ user }: { user: any }) => {
             return;
         }
 
-        sessionStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(form));
-        setSnapshot(form);
-        setIsEditing(false);
-        toast.success('Profile updated successfully.');
+        // ── Detect which sections changed ──
+        const personalFields:   (keyof ProfileForm)[] = ['contactNumber', 'addressLine1', 'addressLine2', 'city', 'province', 'zipCode'];
+        const employmentFields: (keyof ProfileForm)[] = ['position', 'department', 'employmentType', 'employmentStatus'];
+        const governmentFields: (keyof ProfileForm)[] = ['sssNumber', 'pagIbigNumber', 'philHealthNumber', 'tinNumber'];
+
+        const changed: string[] = [];
+        if (personalFields.some(f   => form[f] !== snapshot[f])) changed.push('personal');
+        if (employmentFields.some(f => form[f] !== snapshot[f])) changed.push('employment');
+        if (governmentFields.some(f => form[f] !== snapshot[f])) changed.push('government');
+
+        // ── Build summary ──
+        let summary = 'User updated their profile information.';
+        if (changed.length === 1) {
+            summary = `User updated their ${changed[0]} information.`;
+        } else if (changed.length === 2) {
+            summary = `User updated their ${changed[0]} and ${changed[1]} information.`;
+        } else if (changed.length === 3) {
+            summary = `User updated their personal, employment, and government information.`;
+        }
+
+        try {
+            await apiRequest('/employees/me', {
+                method: 'PUT',
+                body: JSON.stringify({
+                    firstName:        form.fullName.split(' ')[0] ?? '',
+                    lastName:         form.fullName.split(' ').slice(-1)[0] ?? '',
+                    employmentType:   form.employmentType || 'Regular',
+                    department:       form.department     || null,
+                    position:         form.position       || null,
+                    contactNumber:    form.contactNumber  || null,
+                    addressLine1:     form.addressLine1   || null,
+                    addressLine2:     form.addressLine2   || null,
+                    city:             form.city           || null,
+                    province:         form.province       || null,
+                    zipCode:          form.zipCode        || null,
+                    sssNumber:        form.sssNumber      || null,
+                    philHealthNumber: form.philHealthNumber || null,
+                    pagIbigNumber:    form.pagIbigNumber  || null,
+                    tinNumber:        form.tinNumber      || null,
+                    isActive:         form.employmentStatus === 'Active',
+                }),
+            });
+
+            setSnapshot(form);
+            setIsEditing(false);
+            toast.success('Profile updated successfully.');
+            void createActivityLog({
+                action: 'PROFILE_UPDATED',
+                module: 'PROFILE',
+                summary,
+            });
+        } catch {
+            toast.error('Failed to save profile. Please try again.');
+        }
     };
 
     const initials = form.fullName
@@ -779,6 +886,11 @@ const DocumentsTab = () => {
                             setIsSaved(true);
                             toast.success('Documents saved successfully.');
                             setTimeout(() => setIsSaved(false), 3000);
+                            void createActivityLog({
+                                action: 'DOCUMENT_UPLOADED',
+                                module: 'DOCUMENTS',
+                                summary: `User uploaded ${uploadedFiles.length} document${uploadedFiles.length > 1 ? 's' : ''}.`,
+                            });
                         }}
                         className="btn btn-primary flex items-center gap-2"
                     >
@@ -797,37 +909,76 @@ const DocumentsTab = () => {
 
 // ─── Activity Log Tab ─────────────────────────────────────────────────────────
 
-type LogEntry = { id: number; action: string; description: string; timestamp: string; };
-
-const mockLogs: LogEntry[] = [
-    { id: 1, action: 'LOGIN',            description: 'Signed in successfully',                timestamp: 'May 29, 2026 – 9:02 AM'  },
-    { id: 2, action: 'EMPLOYEE_UPDATED', description: 'Updated personal profile information',  timestamp: 'May 28, 2026 – 3:15 PM'  },
-    { id: 3, action: 'USER_PASSWORD_RESET', description: 'Account password changed successfully', timestamp: 'May 20, 2026 – 11:44 AM' },
-    { id: 4, action: 'LOGIN',            description: 'Signed in successfully',                timestamp: 'May 19, 2026 – 8:30 AM'  },
-    { id: 5, action: 'LOGOUT',           description: 'Signed out of the account',             timestamp: 'May 18, 2026 – 5:01 PM'  },
-    { id: 6, action: 'EMPLOYEE_UPDATED', description: 'Updated employment details',            timestamp: 'May 15, 2026 – 2:20 PM'  },
-];
-
-// logTypeBadge removed — now using getBadgeClassName from utils
-
 const ActivityLogTab = () => {
     const [searchTerm,          setSearchTerm]          = useState('');
+    const [debouncedSearch,     setDebouncedSearch]     = useState('');
     const [isTodayFilterActive, setIsTodayFilterActive] = useState(false);
+    const [logs,                setLogs]                = useState<ActivityLogItemDto[]>([]);
+    const [page,                setPage]                = useState(1);
+    const [totalCount,          setTotalCount]          = useState(0);
+    const [isLoading,           setIsLoading]           = useState(true);
+    const [error,               setError]               = useState<string | null>(null);
 
-    const filteredLogs = mockLogs.filter(log => {
-        const [datePart, timePart] = log.timestamp.split(' – ');
-        const matchesSearch =
-            log.action.toLowerCase().includes(searchTerm.toLowerCase())      ||
-            log.description.toLowerCase().includes(searchTerm.toLowerCase()) ||
-            datePart.toLowerCase().includes(searchTerm.toLowerCase())        ||
-            (timePart ?? '').toLowerCase().includes(searchTerm.toLowerCase());
+    const PAGE_SIZE = 10;
 
-        const matchesToday = isTodayFilterActive
-            ? log.timestamp.startsWith(new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }))
-            : true;
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            setDebouncedSearch(searchTerm.trim());
+            setPage(1);
+        }, 300);
+        return () => clearTimeout(timer);
+    }, [searchTerm]);
 
-        return matchesSearch && matchesToday;
-    });
+    useEffect(() => {
+        setPage(1);
+    }, [isTodayFilterActive]);
+
+    useEffect(() => {
+        let isMounted = true;
+
+        const loadLogs = async () => {
+            try {
+                setIsLoading(true);
+                setError(null);
+
+                const response = await getUserActivityLogs({
+                    page,
+                    pageSize: PAGE_SIZE,
+                    search: debouncedSearch || undefined,
+                });
+
+                if (!isMounted) return;
+
+                let data = Array.isArray(response.data) ? response.data : [];
+
+                if (isTodayFilterActive) {
+                    const todayStr = new Date().toLocaleDateString('en-CA', {
+                        timeZone: 'Asia/Manila',
+                    });
+                    data = data.filter(
+                        log => formatDateFilterPart(log.createdAt) === todayStr
+                    );
+                }
+
+                setLogs(data);
+                setTotalCount(isTodayFilterActive ? data.length : response.totalCount);
+            } catch (err) {
+                if (!isMounted) return;
+                setError(err instanceof Error ? err.message : 'Failed to load activity logs.');
+                setLogs([]);
+                setTotalCount(0);
+            } finally {
+                if (isMounted) setIsLoading(false);
+            }
+        };
+
+        void loadLogs();
+        return () => { isMounted = false; };
+    }, [page, debouncedSearch, isTodayFilterActive]);
+
+    const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+    const canGoPrev = page > 1;
+    const canGoNext = page < totalPages;
 
     return (
         <div className="space-y-4">
@@ -867,31 +1018,70 @@ const ActivityLogTab = () => {
                         </tr>
                     </thead>
                     <tbody>
-                        {filteredLogs.length === 0 ? (
+                        {isLoading ? (
+                            <tr>
+                                <td colSpan={4} className="text-center py-8 text-gray-500 italic">
+                                    Loading activity logs...
+                                </td>
+                            </tr>
+                        ) : error ? (
+                            <tr>
+                                <td colSpan={4} className="text-center py-8 text-red-500 italic">
+                                    {error}
+                                </td>
+                            </tr>
+                        ) : logs.length === 0 ? (
                             <tr>
                                 <td colSpan={4} className="text-center py-6 text-gray-400 italic">
                                     No logs match your search.
                                 </td>
                             </tr>
                         ) : (
-                            filteredLogs.map(log => {
-                                const [datePart, timePart] = log.timestamp.split(' – ');
-                                return (
-                                    <tr key={log.id}>
-                                        <td className="whitespace-nowrap !font-medium !text-gray-900">{datePart}</td>
-                                        <td className="whitespace-nowrap !font-medium !text-gray-900">{timePart}</td>
-                                        <td>
-                                            <span className={`inline-flex items-center justify-center px-2.5 py-0.5 rounded-full text-xs font-medium whitespace-nowrap ${getBadgeClassName(log.action)}`}>
-                                                {formatActionLabel(log.action)}
-                                            </span>
-                                        </td>
-                                        <td className="text-gray-500">{log.description}</td>
-                                    </tr>
-                                );
-                            })
+                            logs.map(log => (
+                                <tr key={log.id}>
+                                    <td className="whitespace-nowrap !font-medium !text-gray-900">
+                                        {formatDatePart(log.createdAt)}
+                                    </td>
+                                    <td className="whitespace-nowrap !font-medium !text-gray-900">
+                                        {formatTimePart(log.createdAt)}
+                                    </td>
+                                    <td>
+                                        <span className={`inline-flex items-center justify-center px-2.5 py-0.5 rounded-full text-xs font-medium whitespace-nowrap ${getBadgeClassName(log.action)}`}>
+                                            {formatActionLabel(log.action)}
+                                        </span>
+                                    </td>
+                                    <td className="text-gray-500">
+                                        {log.summary ?? '—'}
+                                    </td>
+                                </tr>
+                            ))
                         )}
                     </tbody>
                 </table>
+
+                {!isLoading && !error && totalPages > 1 && (
+                    <div className="flex items-center justify-between px-6 py-4 border-t border-gray-100">
+                        <button
+                            type="button"
+                            onClick={() => canGoPrev && setPage(prev => prev - 1)}
+                            disabled={!canGoPrev}
+                            className="px-5 py-2 rounded-xl border border-gray-200 text-gray-600 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                            Prev
+                        </button>
+                        <span className="text-gray-500 font-medium">
+                            Page {page} / {totalPages}
+                        </span>
+                        <button
+                            type="button"
+                            onClick={() => canGoNext && setPage(prev => prev + 1)}
+                            disabled={!canGoNext}
+                            className="px-5 py-2 rounded-xl border border-gray-200 text-gray-600 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                            Next
+                        </button>
+                    </div>
+                )}
             </div>
         </div>
     );

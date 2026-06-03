@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using HRIS.Api.Features.Employees.DTOs;
 using HRIS.Api.Features.Employees.Services;
 using HRIS.Api.Features.IAM.Controllers;
@@ -44,6 +45,59 @@ public class EmployeesController : ControllerBase
     {
         var result = await _employees.GetNextEmployeeNumberAsync(ct);
         return Ok(result);
+    }
+
+    [HttpGet("me")]
+    [Authorize]
+    public async Task<ActionResult<EmployeeDto>> GetMe(CancellationToken ct)
+    {
+        var userIdStr = User.FindFirstValue(ClaimTypes.NameIdentifier)
+                        ?? User.FindFirstValue("sub");
+
+        if (!long.TryParse(userIdStr, out var userId))
+            return Unauthorized();
+
+        var employee = await _employees.GetByUserIdAsync(userId, ct);
+        if (employee is null) return NotFound();
+
+        return Ok(employee);
+    }
+
+    [HttpPut("me")]
+    [Authorize]
+    public async Task<ActionResult<EmployeeDto>> UpdateMe(
+        [FromBody] UpdateEmployeeRequest req,
+        CancellationToken ct)
+    {
+        var userIdStr = User.FindFirstValue(ClaimTypes.NameIdentifier)
+                        ?? User.FindFirstValue("sub");
+
+        if (!long.TryParse(userIdStr, out var userId))
+            return Unauthorized();
+
+        var (ok, error, employee) = await _employees.UpdateByUserIdAsync(userId, req, ct);
+
+        if (!ok)
+        {
+            if (error == "Employee not found.")
+                return NotFound(new { message = error });
+
+            if (!string.IsNullOrWhiteSpace(error) && error.Contains(":"))
+            {
+                var errors = new Dictionary<string, string[]>();
+                foreach (var pair in error.Split('|', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    var parts = pair.Split(':', 2, StringSplitOptions.TrimEntries);
+                    if (parts.Length == 2)
+                        errors[parts[0]] = new[] { parts[1] };
+                }
+                return Conflict(new { message = "Validation failed.", errors });
+            }
+
+            return BadRequest(new { message = error });
+        }
+
+        return Ok(employee);
     }
 
     [HttpGet("{id:guid}")]
