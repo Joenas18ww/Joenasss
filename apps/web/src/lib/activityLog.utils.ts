@@ -91,6 +91,8 @@ export function formatActionLabel(action: string) {
       return 'Updated Profile';
     case 'DOCUMENT_UPLOADED':
       return 'Uploaded Document';
+    case 'PASSWORD_CHANGED':
+      return 'Changed Password';
     default:
       return action
         .toLowerCase()
@@ -128,6 +130,8 @@ export function getBadgeClassName(action: string) {
       return 'bg-sky-50 text-sky-700 border border-sky-100';
     case 'DOCUMENT_UPLOADED':
       return 'bg-teal-50 text-teal-700 border border-teal-100';
+    case 'PASSWORD_CHANGED':
+      return 'bg-rose-50 text-rose-700 border border-rose-100';
     default:
       return 'bg-gray-50 text-gray-700 border border-gray-100';
   }

@@ -29,6 +29,38 @@ const maskValue = (value: string): string => {
     return value.slice(0, visible) + value.slice(visible).replace(/[^-\s]/g, '*');
 };
 
+// ─── Gov ID format helpers ────────────────────────────────────────────────────
+
+type GovFormat = {
+    groups:    number[];
+    separator: string;
+};
+
+const GOV_FORMATS: Record<string, GovFormat> = {
+    sssNumber:        { groups: [2, 7, 1], separator: '-' },
+    philHealthNumber: { groups: [2, 9, 1], separator: '-' },
+    pagIbigNumber:    { groups: [4, 4, 4], separator: '-' },
+    tinNumber:        { groups: [3, 3, 3], separator: '-' },
+};
+
+function applyGovFormat(raw: string, format: GovFormat): string {
+    const digits = raw.replace(/\D/g, '');
+    const { groups, separator } = format;
+    let result = '';
+    let idx = 0;
+    for (let g = 0; g < groups.length; g++) {
+        const chunk = digits.slice(idx, idx + groups[g]);
+        if (!chunk) break;
+        result += (g > 0 ? separator : '') + chunk;
+        idx += groups[g];
+    }
+    return result;
+}
+
+function getTotalDigits(format: GovFormat): number {
+    return format.groups.reduce((a, b) => a + b, 0);
+}
+
 // ─── Auto-hide hook ───────────────────────────────────────────────────────────
 
 const AUTO_HIDE_MS = 10_000;
@@ -55,10 +87,54 @@ function useAutoHide(visible: boolean, hide: () => void, isEditing: boolean = fa
             if (timeoutRef.current)  clearTimeout(timeoutRef.current);
         };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [visible]);
+    }, [visible, isEditing]);
 
     return remaining;
 }
+
+// ─── Confirm Modal ────────────────────────────────────────────────────────────
+
+interface ConfirmModalProps {
+    title:    string;
+    message:  string;
+    onConfirm: () => void;
+    onCancel:  () => void;
+}
+
+const ConfirmModal = ({ title, message, onConfirm, onCancel }: ConfirmModalProps) => {
+    const handleKey = (e: React.KeyboardEvent) => {
+        if (e.key === 'Enter') onConfirm();
+        if (e.key === 'Escape') onCancel();
+    };
+
+    return createPortal(
+        <div
+            className="pro-modal-overlay"
+            onClick={e => { if (e.target === e.currentTarget) onCancel(); }}
+            onKeyDown={handleKey}
+        >
+            <div className="pro-modal w-full max-w-sm p-6 space-y-5">
+                <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-emerald-100 flex items-center justify-center shrink-0">
+                        <Check className="w-5 h-5 text-emerald-600" />
+                    </div>
+                    <div>
+                        <p className="text-sm font-semibold text-gray-800">{title}</p>
+                        <p className="text-xs text-gray-400">{message}</p>
+                    </div>
+                </div>
+                <div className="border-t border-gray-100" />
+                <div className="flex gap-2 justify-end">
+                    <button type="button" onClick={onCancel} className="btn btn-secondary text-sm">Cancel</button>
+                    <button type="button" onClick={onConfirm} className="btn btn-primary flex items-center gap-2 text-sm">
+                        <Check className="w-4 h-4" /> Yes, save
+                    </button>
+                </div>
+            </div>
+        </div>,
+        document.body
+    );
+};
 
 // ─── Password Verification Modal ──────────────────────────────────────────────
 
@@ -160,14 +236,23 @@ const SecureField = ({
 }: SecureFieldProps) => {
     const remaining = useAutoHide(visible, onHide, isEditing);
 
+    const fmt            = GOV_FORMATS[name];
+    const formattedValue = fmt ? applyGovFormat(value, fmt) : value;
+
+    const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (!fmt) { onChange(e); return; }
+        const formatted = applyGovFormat(e.target.value, fmt);
+        onChange({ ...e, target: { ...e.target, name, value: formatted } });
+    };
+
     return (
         <div>
             <label className="block text-xs font-medium text-gray-500 mb-1">{label}</label>
             <div className="relative flex items-center gap-2">
                 <input
                     name={name}
-                    value={visible ? value : maskValue(value)}
-                    onChange={onChange}
+                    value={visible ? formattedValue : maskValue(formattedValue)}
+                    onChange={handleChange}
                     readOnly={!visible || !isVerified || !isEditing}
                     className={`pro-input w-full pr-10 font-mono text-sm tracking-wide ${
                         !visible || !isEditing
@@ -234,21 +319,28 @@ const GovernmentInfoSection = ({ form, onChange, isEditing }: GovernmentInfoSect
     }, []);
 
     useEffect(() => {
-        if (isVerified) {
+        if (isVerified && !isEditing) {
             sessionTimer.current = setTimeout(expireSession, SESSION_EXPIRE_MS);
+        } else {
+            if (sessionTimer.current) clearTimeout(sessionTimer.current);
         }
         return () => { if (sessionTimer.current) clearTimeout(sessionTimer.current); };
-    }, [isVerified, expireSession]);
+    }, [isVerified, isEditing, expireSession]);
 
     useEffect(() => () => { if (sessionTimer.current) clearTimeout(sessionTimer.current); }, []);
 
     const handleVerify = async (password: string): Promise<boolean> => {
-        if (password.length > 0) {
+        try {
+            await apiRequest('/auth/verify-password', {
+                method: 'POST',
+                body: JSON.stringify({ password }),
+            });
             setIsVerified(true);
             setModalOpen(false);
             return true;
+        } catch {
+            return false;
         }
-        return false;
     };
 
     return (
@@ -258,8 +350,8 @@ const GovernmentInfoSection = ({ form, onChange, isEditing }: GovernmentInfoSect
             )}
 
             <div className="rounded-xl border border-amber-200 bg-amber-50/50 overflow-hidden">
-                <div className="flex items-start justify-between gap-4 px-5 py-4 border-b border-amber-100">
-                    <div className="flex items-center gap-3">
+                <div className="flex flex-col gap-3 px-5 py-4 border-b border-amber-100">
+                    <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
                         <div className="w-9 h-9 rounded-xl bg-amber-100 flex items-center justify-center shrink-0">
                             <Lock className="w-4 h-4 text-amber-600" />
                         </div>
@@ -271,7 +363,7 @@ const GovernmentInfoSection = ({ form, onChange, isEditing }: GovernmentInfoSect
                         </div>
                     </div>
                     {isVerified && (
-                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-emerald-100 text-emerald-700 shrink-0">
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-emerald-100 text-emerald-700 w-fit">
                             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
                             Session active
                         </span>
@@ -280,34 +372,34 @@ const GovernmentInfoSection = ({ form, onChange, isEditing }: GovernmentInfoSect
 
                 <div className="px-5 py-4 space-y-4">
                     {!isVerified && (
-                        <div className="flex items-center justify-between gap-4 py-2 px-4 rounded-lg bg-white border border-amber-100">
+                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 py-2 px-4 rounded-lg bg-white border border-amber-100">
                             <p className="text-xs text-gray-500">
                                 Your government IDs are hidden. Verify your identity to view or edit them.
                             </p>
                             <button
                                 type="button"
                                 onClick={() => setModalOpen(true)}
-                                className="btn btn-primary flex items-center gap-2 text-xs whitespace-nowrap shrink-0"
+                                className="btn btn-primary flex items-center gap-2 text-xs w-full sm:w-auto shrink-0"
                             >
                                 <ShieldCheck className="w-3.5 h-3.5" />
-                                View Full Information
+                                View Information
                             </button>
                         </div>
                     )}
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <SecureField label="SSS number"       name="sssNumber"        value={form.sssNumber}
+                        <SecureField label="SSS number"        name="sssNumber"        value={form.sssNumber}
                             visible={showSSS}        onShow={() => setShowSSS(true)}        onHide={() => setShowSSS(false)}
-                            onChange={onChange} placeholder="10 digits" maxLength={12} isVerified={isVerified} isEditing={isEditing} />
-                        <SecureField label="Pag-IBIG number"  name="pagIbigNumber"    value={form.pagIbigNumber}
+                            onChange={onChange} placeholder="XX-XXXXXXX-X"   maxLength={12} isVerified={isVerified} isEditing={isEditing} />
+                        <SecureField label="Pag-IBIG number"   name="pagIbigNumber"    value={form.pagIbigNumber}
                             visible={showPagIbig}    onShow={() => setShowPagIbig(true)}    onHide={() => setShowPagIbig(false)}
-                            onChange={onChange} placeholder="12 digits" maxLength={14} isVerified={isVerified} isEditing={isEditing} />
+                            onChange={onChange} placeholder="XXXX-XXXX-XXXX" maxLength={14} isVerified={isVerified} isEditing={isEditing} />
                         <SecureField label="PhilHealth number" name="philHealthNumber" value={form.philHealthNumber}
                             visible={showPhilHealth} onShow={() => setShowPhilHealth(true)} onHide={() => setShowPhilHealth(false)}
-                            onChange={onChange} placeholder="12 digits" maxLength={14} isVerified={isVerified} isEditing={isEditing} />
-                        <SecureField label="TIN number"       name="tinNumber"        value={form.tinNumber}
+                            onChange={onChange} placeholder="XX-XXXXXXXXX-X" maxLength={14} isVerified={isVerified} isEditing={isEditing} />
+                        <SecureField label="TIN number"        name="tinNumber"        value={form.tinNumber}
                             visible={showTIN}        onShow={() => setShowTIN(true)}        onHide={() => setShowTIN(false)}
-                            onChange={onChange} placeholder="9 digits"  maxLength={11} isVerified={isVerified} isEditing={isEditing} />
+                            onChange={onChange} placeholder="XXX-XXX-XXX"    maxLength={11} isVerified={isVerified} isEditing={isEditing} />
                     </div>
 
                     {isVerified && !isEditing && (
@@ -345,9 +437,9 @@ type ProfileForm = {
 
 const employmentTypeOptions   = ['Regular', 'Probationary', 'Project-based'];
 const employmentStatusOptions = ['Active', 'Inactive'];
-const PROFILE_STORAGE_KEY     = 'settings.profileForm';
+// const PROFILE_STORAGE_KEY     = 'settings.profileForm';
 
-const ProfileTab = ({ user }: { user: any }) => {
+const ProfileTab = ({ user, onSaved }: { user: any; onSaved?: () => void }) => {
     const emptyForm: ProfileForm = {
         fullName:         '',
         email:            '',
@@ -367,12 +459,19 @@ const ProfileTab = ({ user }: { user: any }) => {
         tinNumber:        '',
     };
 
-    const [form,        setForm]        = useState<ProfileForm>(emptyForm);
-    const [snapshot,    setSnapshot]    = useState<ProfileForm>(emptyForm);
-    const [isEditing,   setIsEditing]   = useState(false);
-    const [isLoading,   setIsLoading]   = useState(true);
-    const [avatar,      setAvatar]      = useState<AvatarState>({ url: null });
+    const [form,          setForm]          = useState<ProfileForm>(emptyForm);
+    const [snapshot,      setSnapshot]      = useState<ProfileForm>(emptyForm);
+    const [isEditing,     setIsEditing]     = useState(false);
+    const [isLoading,     setIsLoading]     = useState(true);
+    const [confirmOpen,   setConfirmOpen]   = useState(false);
+    const [avatar,        setAvatar]        = useState<AvatarState>({ url: null });
     const avatarInputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+        if (!user?.id) return;
+        const saved = localStorage.getItem(`settings.avatar.${user.id}`);
+        if (saved) setAvatar({ url: saved });
+    }, [user?.id]);
 
     useEffect(() => {
         const fetchProfile = async () => {
@@ -432,9 +531,15 @@ const ProfileTab = ({ user }: { user: any }) => {
     const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
-        const url = URL.createObjectURL(file);
-        setAvatar({ url });
-        toast.success('Profile photo updated.');
+
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            const base64 = event.target?.result as string;
+            setAvatar({ url: base64 });
+            if (user?.id) localStorage.setItem(`settings.avatar.${user.id}`, base64);
+            toast.success('Profile photo updated.');
+        };
+        reader.readAsDataURL(file);
     };
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
@@ -450,14 +555,18 @@ const ProfileTab = ({ user }: { user: any }) => {
         setIsEditing(false);
     };
 
-    const handleSave = async () => {
+    const handleSave = () => {
         const hasChanges = JSON.stringify(form) !== JSON.stringify(snapshot);
-
         if (!hasChanges) {
             toast.info('No changes have been made.');
             setIsEditing(false);
             return;
         }
+        setConfirmOpen(true);
+    };
+
+    const handleConfirmSave = async () => {
+        setConfirmOpen(false);
 
         // ── Detect which sections changed ──
         const personalFields:   (keyof ProfileForm)[] = ['contactNumber', 'addressLine1', 'addressLine2', 'city', 'province', 'zipCode'];
@@ -510,6 +619,7 @@ const ProfileTab = ({ user }: { user: any }) => {
                 module: 'PROFILE',
                 summary,
             });
+            onSaved?.();
         } catch {
             toast.error('Failed to save profile. Please try again.');
         }
@@ -529,20 +639,29 @@ const ProfileTab = ({ user }: { user: any }) => {
 
     return (
         <div className="space-y-8">
+            {confirmOpen && (
+                <ConfirmModal
+                    title="Save changes?"
+                    message="Are you sure you want to save your profile changes?"
+                    onConfirm={handleConfirmSave}
+                    onCancel={() => setConfirmOpen(false)}
+                />
+            )}
 
             {/* Avatar row + Edit / Save / Cancel */}
-            <div className="flex items-center justify-between gap-4">
-                <div className="flex items-center gap-4">
-                    {/* Hidden file input */}
-                    <input
-                        ref={avatarInputRef}
-                        type="file"
-                        accept="image/*"
-                        className="hidden"
-                        onChange={handleAvatarChange}
-                    />
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            {/* Hidden file input */}
+                <input
+                    ref={avatarInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={handleAvatarChange}
+                />
 
-                    {/* Clickable avatar */}
+                {/* Top row on mobile: avatar + edit button */}
+                <div className="flex items-start justify-between sm:items-center gap-4">
+                    {/* Avatar */}
                     <button
                         type="button"
                         onClick={() => avatarInputRef.current?.click()}
@@ -560,21 +679,38 @@ const ProfileTab = ({ user }: { user: any }) => {
                                 {initials}
                             </div>
                         )}
-                        {/* Hover overlay */}
                         <div className="absolute inset-0 bg-black/40 flex items-center justify-center rounded-2xl opacity-0 group-hover:opacity-100 transition-opacity">
                             <Upload className="w-4 h-4 text-white" />
                         </div>
                     </button>
 
-                    <div>
-                        <p className="text-sm font-semibold text-gray-800">{form.fullName || '—'}</p>
-                        <p className="text-xs text-gray-400">{form.position || 'No position set'}</p>
+                    {/* Edit button — only visible on mobile (right of avatar) */}
+                    <div className="flex items-center gap-2 sm:hidden">
+                        {!isEditing ? (
+                            <button onClick={handleEdit} className="btn btn-secondary flex items-center gap-2" type="button">
+                                <Pencil className="w-4 h-4" /> Edit
+                            </button>
+                        ) : (
+                            <>
+                                <button onClick={handleCancel} className="btn btn-secondary flex items-center gap-2" type="button">
+                                    <X className="w-4 h-4" />
+                                </button>
+                                <button onClick={handleSave} className="btn btn-primary flex items-center gap-2" type="button">
+                                    <Check className="w-4 h-4" />
+                                </button>
+                            </>
+                        )}
                     </div>
                 </div>
 
-                <div className="flex items-center gap-2 shrink-0">
-                    
+                {/* Name & position — below avatar on mobile */}
+                <div className="flex-1">
+                    <p className="text-sm font-semibold text-gray-800">{form.fullName || '—'}</p>
+                    <p className="text-xs text-gray-400">{form.position || 'No position set'}</p>
+                </div>
 
+                {/* Edit button — only visible on desktop (far right) */}
+                <div className="hidden sm:flex items-center gap-2 shrink-0">
                     {!isEditing ? (
                         <button onClick={handleEdit} className="btn btn-secondary flex items-center gap-2" type="button">
                             <Pencil className="w-4 h-4" /> Edit
@@ -640,40 +776,36 @@ const ProfileTab = ({ user }: { user: any }) => {
             </div>
 
             <div className="border-t border-gray-100" />
-
-            {/* ── Employment Information ── */}
+{/* ── Employment Information ── */}
             <div>
                 <h3 className="text-sm font-semibold text-gray-700 mb-4">Employment information</h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
                         <label className="block text-xs font-medium text-gray-500 mb-1">Position</label>
-                        <input name="position" value={form.position} onChange={handleChange}
-                            readOnly={!isEditing} className={inputClass} placeholder="e.g. Software Engineer" />
+                        <input value={form.position} readOnly
+                            className="pro-input w-full bg-gray-50 text-gray-400 cursor-not-allowed" placeholder="e.g. Software Engineer" />
                     </div>
                     <div>
                         <label className="block text-xs font-medium text-gray-500 mb-1">Department</label>
-                        <input name="department" value={form.department} onChange={handleChange}
-                            readOnly={!isEditing} className={inputClass} placeholder="e.g. Engineering" />
+                        <input value={form.department} readOnly
+                            className="pro-input w-full bg-gray-50 text-gray-400 cursor-not-allowed" placeholder="e.g. Engineering" />
                     </div>
                     <div>
                         <label className="block text-xs font-medium text-gray-500 mb-1">Employment type</label>
-                        <select name="employmentType" value={form.employmentType} onChange={handleChange}
-                            disabled={!isEditing} className={selectClass}>
-                            <option value="">Select type</option>
-                            {employmentTypeOptions.map(o => <option key={o} value={o}>{o}</option>)}
-                        </select>
+                        <input value={form.employmentType} readOnly
+                            className="pro-input w-full bg-gray-50 text-gray-400 cursor-not-allowed" placeholder="e.g. Regular" />
                     </div>
                     <div>
                         <label className="block text-xs font-medium text-gray-500 mb-1">Employment status</label>
-                        <select name="employmentStatus" value={form.employmentStatus} onChange={handleChange}
-                            disabled={!isEditing} className={selectClass}>
-                            {employmentStatusOptions.map(o => <option key={o} value={o}>{o}</option>)}
-                        </select>
+                        <input value={form.employmentStatus} readOnly
+                            className="pro-input w-full bg-gray-50 text-gray-400 cursor-not-allowed" />
                     </div>
                 </div>
+                <p className="mt-3 text-xs text-gray-400 flex items-center gap-1.5 italic">
+                    <Lock className="w-3 h-3 shrink-0" />
+                    Employment information can only be updated by an administrator.
+                </p>
             </div>
-
-            <div className="border-t border-gray-100" />
 
             {/* ── Government Information (secure) ── */}
             <GovernmentInfoSection
@@ -692,12 +824,26 @@ const ProfileTab = ({ user }: { user: any }) => {
 
 // ─── Account & Security Tab ───────────────────────────────────────────────────
 
-const SecurityTab = ({ user }: { user: any }) => {
-    const [showCurrent, setShowCurrent] = useState(false);
-    const [showNew,     setShowNew]     = useState(false);
-    const [showConfirm, setShowConfirm] = useState(false);
-    const [passwords,   setPasswords]   = useState({ current: '', newPass: '', confirm: '' });
-    const [error,       setError]       = useState('');
+const SecurityTab = ({ user, onSaved }: { user: any; onSaved?: () => void }) => {
+    const [showCurrent,    setShowCurrent]    = useState(false);
+    const [showNew,        setShowNew]        = useState(false);
+    const [showConfirm,    setShowConfirm]    = useState(false);
+    const [passwords,      setPasswords]      = useState({ current: '', newPass: '', confirm: '' });
+    const [error,          setError]          = useState('');
+    const [employeeNumber, setEmployeeNumber] = useState<string | null>(null);
+    const [confirmOpen,    setConfirmOpen]    = useState(false);
+
+    useEffect(() => {
+        const fetchEmployeeNumber = async () => {
+            try {
+                const data = await apiRequest<any>('/employees/me');
+                setEmployeeNumber(data.employeeNumber ?? null);
+            } catch {
+                setEmployeeNumber(null);
+            }
+        };
+        void fetchEmployeeNumber();
+    }, []);
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         setPasswords(prev => ({ ...prev, [e.target.name]: e.target.value }));
@@ -708,21 +854,55 @@ const SecurityTab = ({ user }: { user: any }) => {
         if (!passwords.current)                      { setError('Please enter your current password.'); return; }
         if (passwords.newPass !== passwords.confirm) { setError('New passwords do not match.'); return; }
         if (passwords.newPass.length < 8)            { setError('Password must be at least 8 characters.'); return; }
+        setConfirmOpen(true);
+    };
 
-        // TODO: connect to API — changePassword(user.id, passwords.current, passwords.newPass)
-        setPasswords({ current: '', newPass: '', confirm: '' });
-        setError('');
-        toast.success('Password updated successfully.');
+    const handleConfirmSave = async () => {
+        setConfirmOpen(false);
+        try {
+            await apiRequest('/auth/change-password', {
+                method: 'POST',
+                body: JSON.stringify({
+                    currentPassword: passwords.current,
+                    newPassword:     passwords.newPass,
+                }),
+            });
+
+            setPasswords({ current: '', newPass: '', confirm: '' });
+            setError('');
+            toast.success('Password updated successfully.');
+            void createActivityLog({
+                action: 'PASSWORD_CHANGED',
+                module: 'SECURITY',
+                summary: 'User changed their password.',
+            });
+            onSaved?.();
+        } catch (err: any) {
+            const message = err?.message ?? '';
+            if (message.toLowerCase().includes('incorrect')) {
+                setError('Current password is incorrect.');
+            } else {
+                setError('Failed to update password. Please try again.');
+            }
+        }
     };
 
     return (
         <div className="space-y-6">
+            {confirmOpen && (
+                <ConfirmModal
+                    title="Update password?"
+                    message="Are you sure you want to change your password?"
+                    onConfirm={handleConfirmSave}
+                    onCancel={() => setConfirmOpen(false)}
+                />
+            )}
             <div>
                 <h3 className="text-sm font-semibold text-gray-700 mb-3">Account information</h3>
-                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
                     <div>
                         <label className="block text-xs font-medium text-gray-500 mb-1">Employee ID</label>
-                        <input value={user?.employeeId ?? '—'} readOnly
+                        <input value={employeeNumber ?? '—'} readOnly
                             className="pro-input w-full bg-gray-50 text-gray-400 cursor-not-allowed" />
                     </div>
                     <div>
@@ -736,13 +916,6 @@ const SecurityTab = ({ user }: { user: any }) => {
                             className="pro-input w-full bg-gray-50 text-gray-400 cursor-not-allowed" />
                     </div>
                     <div>
-                        <label className="block text-xs font-medium text-gray-500 mb-1">Status</label>
-                        <div className="flex items-center h-10">
-                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700">
-                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                                Active
-                            </span>
-                        </div>
                     </div>
                 </div>
             </div>
@@ -909,7 +1082,7 @@ const DocumentsTab = () => {
 
 // ─── Activity Log Tab ─────────────────────────────────────────────────────────
 
-const ActivityLogTab = () => {
+const ActivityLogTab = ({ refreshKey }: { refreshKey: number }) => {
     const [searchTerm,          setSearchTerm]          = useState('');
     const [debouncedSearch,     setDebouncedSearch]     = useState('');
     const [isTodayFilterActive, setIsTodayFilterActive] = useState(false);
@@ -974,7 +1147,7 @@ const ActivityLogTab = () => {
 
         void loadLogs();
         return () => { isMounted = false; };
-    }, [page, debouncedSearch, isTodayFilterActive]);
+    }, [page, debouncedSearch, isTodayFilterActive, refreshKey]);
 
     const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
     const canGoPrev = page > 1;
@@ -1007,7 +1180,7 @@ const ActivityLogTab = () => {
                 </button>
             </div>
 
-            <div className="overflow-x-auto rounded-xl border border-gray-100">
+            <div className="overflow-x-auto rounded-xl border border-gray-100 min-h-[520px]">
                 <table className="pro-table min-w-full">
                     <thead>
                         <tr>
@@ -1091,7 +1264,10 @@ const ActivityLogTab = () => {
 
 const UserSettings = () => {
     const { user } = useAuth();
-    const [activeTab, setActiveTab] = useState<SettingsTab>('profile');
+    const [activeTab,      setActiveTab]      = useState<SettingsTab>('profile');
+    const [logRefreshKey,  setLogRefreshKey]  = useState(0);
+
+    const triggerLogRefresh = () => setLogRefreshKey(k => k + 1);
 
     return (
         <div className="space-y-6">
@@ -1119,10 +1295,10 @@ const UserSettings = () => {
                 </div>
 
                 <div className="p-6">
-                    {activeTab === 'profile'   && <ProfileTab  user={user} />}
-                    {activeTab === 'security'  && <SecurityTab user={user} />}
-                    {activeTab === 'documents' && <DocumentsTab />}
-                    {activeTab === 'logs'      && <ActivityLogTab />}
+                    <div className={activeTab === 'profile'   ? '' : 'hidden'}><ProfileTab  user={user} onSaved={triggerLogRefresh} /></div>
+                    <div className={activeTab === 'security'  ? '' : 'hidden'}><SecurityTab user={user} onSaved={triggerLogRefresh} /></div>
+                    <div className={activeTab === 'documents' ? '' : 'hidden'}><DocumentsTab /></div>
+                    <div className={activeTab === 'logs'      ? '' : 'hidden'}><ActivityLogTab refreshKey={logRefreshKey} /></div>
                 </div>
             </div>
         </div>
