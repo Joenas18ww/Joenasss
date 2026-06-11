@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
     User, Lock, Activity, FileText,
     Eye, EyeOff, Check, AlertCircle,
@@ -11,6 +11,10 @@ import { Calendar, Search } from 'lucide-react';
 import { getBadgeClassName, formatActionLabel, formatDatePart, formatTimePart, formatDateFilterPart } from '../../lib/activityLog.utils';
 import { getUserActivityLogs, createActivityLog, type ActivityLogItemDto } from '../../lib/activityLogs';
 import { apiRequest } from '../../lib/api';
+import { DropdownMenu, PROVINCE_OPTIONS } from '../../components/personal-records/EmployeeFormFields';
+import { LOCATION_OPTIONS } from '../../components/personal-records/locationOptions';
+
+
 
 type SettingsTab = 'profile' | 'security' | 'documents' | 'logs';
 
@@ -42,6 +46,15 @@ const GOV_FORMATS: Record<string, GovFormat> = {
     pagIbigNumber:    { groups: [4, 4, 4], separator: '-' },
     tinNumber:        { groups: [3, 3, 3], separator: '-' },
 };
+
+// ─── Phone format helper ──────────────────────────────────────────────────────
+
+function formatContactNumber(raw: string): string {
+    const digits = raw.replace(/\D/g, '').slice(0, 11);
+    if (digits.length <= 4) return digits;
+    if (digits.length <= 7) return `${digits.slice(0, 4)}-${digits.slice(4)}`;
+    return `${digits.slice(0, 4)}-${digits.slice(4, 7)}-${digits.slice(7)}`;
+}
 
 function applyGovFormat(raw: string, format: GovFormat): string {
     const digits = raw.replace(/\D/g, '');
@@ -293,25 +306,48 @@ type GovInfoFields = {
 };
 
 interface GovernmentInfoSectionProps {
-    form:      GovInfoFields;
-    onChange:  (e: React.ChangeEvent<HTMLInputElement>) => void;
-    isEditing: boolean;
+    onSaved?: () => void;
 }
 
 const SESSION_EXPIRE_MS = 60_000;
 
-const GovernmentInfoSection = ({ form, onChange, isEditing }: GovernmentInfoSectionProps) => {
+const GovernmentInfoSection = ({ onSaved }: GovernmentInfoSectionProps) => {
     const [isVerified,     setIsVerified]     = useState(false);
+    const [isEditing,      setIsEditing]      = useState(false);
+    const [confirmOpen,    setConfirmOpen]    = useState(false);
     const [modalOpen,      setModalOpen]      = useState(false);
     const [showSSS,        setShowSSS]        = useState(false);
     const [showTIN,        setShowTIN]        = useState(false);
     const [showPagIbig,    setShowPagIbig]    = useState(false);
     const [showPhilHealth, setShowPhilHealth] = useState(false);
 
+    const [form,     setForm]     = useState<GovInfoFields>({ sssNumber: '', pagIbigNumber: '', philHealthNumber: '', tinNumber: '' });
+    const [snapshot, setSnapshot] = useState<GovInfoFields>({ sssNumber: '', pagIbigNumber: '', philHealthNumber: '', tinNumber: '' });
+
     const sessionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    useEffect(() => {
+        const fetchGovInfo = async () => {
+            try {
+                const data = await apiRequest<any>('/employees/me');
+                const loaded: GovInfoFields = {
+                    sssNumber:        data.sssNumber        ?? '',
+                    pagIbigNumber:    data.pagIbigNumber    ?? '',
+                    philHealthNumber: data.philHealthNumber ?? '',
+                    tinNumber:        data.tinNumber        ?? '',
+                };
+                setForm(loaded);
+                setSnapshot(loaded);
+            } catch {
+                // keep empty
+            }
+        };
+        void fetchGovInfo();
+    }, []);
 
     const expireSession = useCallback(() => {
         setIsVerified(false);
+        setIsEditing(false);
         setShowSSS(false);
         setShowTIN(false);
         setShowPagIbig(false);
@@ -328,6 +364,74 @@ const GovernmentInfoSection = ({ form, onChange, isEditing }: GovernmentInfoSect
     }, [isVerified, isEditing, expireSession]);
 
     useEffect(() => () => { if (sessionTimer.current) clearTimeout(sessionTimer.current); }, []);
+
+    const handleChange = (e: React.ChangeEvent<HTMLInputElement>) =>
+        setForm(prev => ({ ...prev, [e.target.name]: e.target.value }));
+
+    const handleEdit = () => {
+        setSnapshot(form);
+        setIsEditing(true);
+    };
+
+    const handleCancel = () => {
+        setForm(snapshot);
+        setIsEditing(false);
+    };
+
+    const handleSave = () => {
+        const hasChanges = JSON.stringify(form) !== JSON.stringify(snapshot);
+        if (!hasChanges) {
+            toast.info('No changes have been made.');
+            setIsEditing(false);
+            return;
+        }
+        setConfirmOpen(true);
+    };
+
+    const handleConfirmSave = async () => {
+        setConfirmOpen(false);
+        try {
+            const existing = await apiRequest<any>('/employees/me');
+
+            const nameParts = (existing.fullName ?? '').split(' ');
+            const firstName = existing.firstName || nameParts[0] || '';
+            const lastName  = existing.lastName  || nameParts.slice(-1)[0] || '';
+
+            await apiRequest('/employees/me', {
+                method: 'PUT',
+                body: JSON.stringify({
+                    firstName,
+                    lastName,
+                    employmentType:   existing.employmentType   || 'Regular',
+                    department:       existing.department       || null,
+                    position:         existing.position         || null,
+                    contactNumber:    existing.contactNumber    || null,
+                    addressLine1:     existing.addressLine1     || null,
+                    addressLine2:     existing.addressLine2     || null,
+                    city:             existing.city             || null,
+                    province:         existing.province         || null,
+                    zipCode:          existing.zipCode          || null,
+                    isActive:         existing.isActive         ?? true,
+                    sssNumber:        form.sssNumber        ? form.sssNumber.replace(/\D/g, '')        : null,
+                    philHealthNumber: form.philHealthNumber ? form.philHealthNumber.replace(/\D/g, '') : null,
+                    pagIbigNumber:    form.pagIbigNumber    ? form.pagIbigNumber.replace(/\D/g, '')    : null,
+                    tinNumber:        form.tinNumber        ? form.tinNumber.replace(/\D/g, '')        : null,
+                }),
+            });
+            setSnapshot(form);
+            setIsEditing(false);
+            toast.success('Government information updated.');
+            void createActivityLog({
+                action: 'PROFILE_UPDATED',
+                module: 'PROFILE',
+                summary: 'User updated their government information.',
+            });
+            onSaved?.();
+        } catch (err: any) {
+            console.error('Gov save error:', err);
+            toast.error(err?.message ?? 'Failed to save. Please try again.');
+        }
+    };
 
     const handleVerify = async (password: string): Promise<boolean> => {
         try {
@@ -350,18 +454,65 @@ const GovernmentInfoSection = ({ form, onChange, isEditing }: GovernmentInfoSect
             )}
 
             <div className="rounded-xl border border-amber-200 bg-amber-50/50 overflow-hidden">
-                <div className="flex flex-col gap-3 px-5 py-4 border-b border-amber-100">
-                    <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
-                        <div className="w-9 h-9 rounded-xl bg-amber-100 flex items-center justify-center shrink-0">
-                            <Lock className="w-4 h-4 text-amber-600" />
+                <div className="px-5 py-4 border-b border-amber-100 space-y-3">
+                    {/* Row 1: lock icon + Edit button (mobile) / lock icon + title + Edit button (desktop) */}
+                    <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+                            <div className="w-9 h-9 rounded-xl bg-amber-100 flex items-center justify-center shrink-0">
+                                <Lock className="w-4 h-4 text-amber-600" />
+                            </div>
+                            <div className="hidden sm:block min-w-0">
+                                <p className="text-sm font-semibold text-gray-800">Government Information</p>
+                                <p className="text-xs text-gray-500 mt-0.5">
+                                    Sensitive government information is protected for your privacy and security.
+                                </p>
+                            </div>
                         </div>
-                        <div>
-                            <p className="text-sm font-semibold text-gray-800">Government Information</p>
-                            <p className="text-xs text-gray-500 mt-0.5">
-                                Sensitive government information is protected for your privacy and security.
-                            </p>
-                        </div>
+                        {isVerified && (
+                            <div className="flex sm:hidden items-center gap-2 shrink-0">
+                                {!isEditing ? (
+                                    <button onClick={handleEdit} className="btn btn-secondary flex items-center gap-2 text-xs" type="button">
+                                        <Pencil className="w-3.5 h-3.5" /> Edit
+                                    </button>
+                                ) : (
+                                    <>
+                                        <button onClick={handleCancel} className="btn btn-secondary flex items-center gap-2 text-xs" type="button">
+                                            <X className="w-3.5 h-3.5" />
+                                        </button>
+                                        <button onClick={handleSave} className="btn btn-primary flex items-center gap-2 text-xs" type="button">
+                                            <Check className="w-3.5 h-3.5" />
+                                        </button>
+                                    </>
+                                )}
+                            </div>
+                        )}
+                        {isVerified && (
+                            <div className="hidden sm:flex items-center gap-2 shrink-0">
+                                {!isEditing ? (
+                                    <button onClick={handleEdit} className="btn btn-secondary flex items-center gap-2 text-xs" type="button">
+                                        <Pencil className="w-3.5 h-3.5" /> Edit
+                                    </button>
+                                ) : (
+                                    <>
+                                        <button onClick={handleCancel} className="btn btn-secondary flex items-center gap-2 text-xs" type="button">
+                                            <X className="w-3.5 h-3.5" />
+                                        </button>
+                                        <button onClick={handleSave} className="btn btn-primary flex items-center gap-2 text-xs" type="button">
+                                            <Check className="w-3.5 h-3.5" />
+                                        </button>
+                                    </>
+                                )}
+                            </div>
+                        )}
                     </div>
+                    {/* Row 2: title + description (mobile only) */}
+                    <div className="sm:hidden">
+                        <p className="text-sm font-semibold text-gray-800">Government Information</p>
+                        <p className="text-xs text-gray-500 mt-0.5">
+                            Sensitive government information is protected for your privacy and security.
+                        </p>
+                    </div>
+                    {/* Row 3: Session active badge (mobile + desktop) */}
                     {isVerified && (
                         <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-emerald-100 text-emerald-700 w-fit">
                             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
@@ -390,16 +541,16 @@ const GovernmentInfoSection = ({ form, onChange, isEditing }: GovernmentInfoSect
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <SecureField label="SSS number"        name="sssNumber"        value={form.sssNumber}
                             visible={showSSS}        onShow={() => setShowSSS(true)}        onHide={() => setShowSSS(false)}
-                            onChange={onChange} placeholder="XX-XXXXXXX-X"   maxLength={12} isVerified={isVerified} isEditing={isEditing} />
+                            onChange={handleChange} placeholder="XX-XXXXXXX-X"   maxLength={12} isVerified={isVerified} isEditing={isEditing} />
                         <SecureField label="Pag-IBIG number"   name="pagIbigNumber"    value={form.pagIbigNumber}
                             visible={showPagIbig}    onShow={() => setShowPagIbig(true)}    onHide={() => setShowPagIbig(false)}
-                            onChange={onChange} placeholder="XXXX-XXXX-XXXX" maxLength={14} isVerified={isVerified} isEditing={isEditing} />
+                            onChange={handleChange} placeholder="XXXX-XXXX-XXXX" maxLength={14} isVerified={isVerified} isEditing={isEditing} />
                         <SecureField label="PhilHealth number" name="philHealthNumber" value={form.philHealthNumber}
                             visible={showPhilHealth} onShow={() => setShowPhilHealth(true)} onHide={() => setShowPhilHealth(false)}
-                            onChange={onChange} placeholder="XX-XXXXXXXXX-X" maxLength={14} isVerified={isVerified} isEditing={isEditing} />
+                            onChange={handleChange} placeholder="XX-XXXXXXXXX-X" maxLength={14} isVerified={isVerified} isEditing={isEditing} />
                         <SecureField label="TIN number"        name="tinNumber"        value={form.tinNumber}
                             visible={showTIN}        onShow={() => setShowTIN(true)}        onHide={() => setShowTIN(false)}
-                            onChange={onChange} placeholder="XXX-XXX-XXX"    maxLength={11} isVerified={isVerified} isEditing={isEditing} />
+                            onChange={handleChange} placeholder="XXX-XXX-XXX"    maxLength={11} isVerified={isVerified} isEditing={isEditing} />
                     </div>
 
                     {isVerified && !isEditing && (
@@ -407,6 +558,14 @@ const GovernmentInfoSection = ({ form, onChange, isEditing }: GovernmentInfoSect
                             <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
                             Verification session expires in 1 minute. Each revealed field hides after 10 seconds.
                         </p>
+                    )}
+                    {confirmOpen && (
+                        <ConfirmModal
+                            title="Save changes?"
+                            message="Are you sure you want to update your government information?"
+                            onConfirm={handleConfirmSave}
+                            onCancel={() => setConfirmOpen(false)}
+                        />
                     )}
                 </div>
             </div>
@@ -429,10 +588,6 @@ type ProfileForm = {
     employmentType:   string;
     department:       string;
     employmentStatus: string;
-    sssNumber:        string;
-    pagIbigNumber:    string;
-    philHealthNumber: string;
-    tinNumber:        string;
 };
 
 const employmentTypeOptions   = ['Regular', 'Probationary', 'Project-based'];
@@ -453,10 +608,6 @@ const ProfileTab = ({ user, onSaved }: { user: any; onSaved?: () => void }) => {
         employmentType:   '',
         department:       '',
         employmentStatus: 'Active',
-        sssNumber:        '',
-        pagIbigNumber:    '',
-        philHealthNumber: '',
-        tinNumber:        '',
     };
 
     const [form,          setForm]          = useState<ProfileForm>(emptyForm);
@@ -466,6 +617,20 @@ const ProfileTab = ({ user, onSaved }: { user: any; onSaved?: () => void }) => {
     const [confirmOpen,   setConfirmOpen]   = useState(false);
     const [avatar,        setAvatar]        = useState<AvatarState>({ url: null });
     const avatarInputRef = useRef<HTMLInputElement>(null);
+
+    type ProfileDropdownKey = 'province' | 'city' | null;
+    const [openDropdown, setOpenDropdown] = useState<ProfileDropdownKey>(null);
+
+    const cityOptions = useMemo(() => {
+        const selected = form.province as keyof typeof LOCATION_OPTIONS;
+        if (!selected || !(selected in LOCATION_OPTIONS)) return [];
+        return LOCATION_OPTIONS[selected].map(city => ({ label: city, value: city }));
+    }, [form.province]);
+
+    const handleProvinceSelect = (value: string) => {
+        setForm(prev => ({ ...prev, province: value, city: '' }));
+        setOpenDropdown(null);
+    };
 
     useEffect(() => {
         if (!user?.id) return;
@@ -491,10 +656,6 @@ const ProfileTab = ({ user, onSaved }: { user: any; onSaved?: () => void }) => {
                     employmentType:   data.employmentType   ?? '',
                     department:       data.department       ?? '',
                     employmentStatus: data.isActive ? 'Active' : 'Inactive',
-                    sssNumber:        data.sssNumber        ?? '',
-                    pagIbigNumber:    data.pagIbigNumber    ?? '',
-                    philHealthNumber: data.philHealthNumber ?? '',
-                    tinNumber:        data.tinNumber        ?? '',
                 };
                 setForm(loaded);
                 setSnapshot(loaded);
@@ -513,10 +674,6 @@ const ProfileTab = ({ user, onSaved }: { user: any; onSaved?: () => void }) => {
                     employmentType:   '',
                     department:       '',
                     employmentStatus: 'Active',
-                    sssNumber:        '',
-                    pagIbigNumber:    '',
-                    philHealthNumber: '',
-                    tinNumber:        '',
                 };
                 setForm(fallback);
                 setSnapshot(fallback);
@@ -536,14 +693,23 @@ const ProfileTab = ({ user, onSaved }: { user: any; onSaved?: () => void }) => {
         reader.onload = (event) => {
             const base64 = event.target?.result as string;
             setAvatar({ url: base64 });
-            if (user?.id) localStorage.setItem(`settings.avatar.${user.id}`, base64);
+            if (user?.id) {
+                localStorage.setItem(`settings.avatar.${user.id}`, base64);
+                window.dispatchEvent(new StorageEvent("storage", {
+                    key: `settings.avatar.${user.id}`,
+                    newValue: base64,
+                }));
+                }
             toast.success('Profile photo updated.');
         };
         reader.readAsDataURL(file);
     };
 
-    const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
-        setForm(prev => ({ ...prev, [e.target.name]: e.target.value }));
+    const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+    const { name, value } = e.target;
+    const formatted = name === 'contactNumber' ? formatContactNumber(value) : value;
+        setForm(prev => ({ ...prev, [name]: formatted }));
+    };
 
     const handleEdit = () => {
         setSnapshot(form);
@@ -571,12 +737,10 @@ const ProfileTab = ({ user, onSaved }: { user: any; onSaved?: () => void }) => {
         // ── Detect which sections changed ──
         const personalFields:   (keyof ProfileForm)[] = ['contactNumber', 'addressLine1', 'addressLine2', 'city', 'province', 'zipCode'];
         const employmentFields: (keyof ProfileForm)[] = ['position', 'department', 'employmentType', 'employmentStatus'];
-        const governmentFields: (keyof ProfileForm)[] = ['sssNumber', 'pagIbigNumber', 'philHealthNumber', 'tinNumber'];
 
         const changed: string[] = [];
         if (personalFields.some(f   => form[f] !== snapshot[f])) changed.push('personal');
         if (employmentFields.some(f => form[f] !== snapshot[f])) changed.push('employment');
-        if (governmentFields.some(f => form[f] !== snapshot[f])) changed.push('government');
 
         // ── Build summary ──
         let summary = 'User updated their profile information.';
@@ -584,11 +748,10 @@ const ProfileTab = ({ user, onSaved }: { user: any; onSaved?: () => void }) => {
             summary = `User updated their ${changed[0]} information.`;
         } else if (changed.length === 2) {
             summary = `User updated their ${changed[0]} and ${changed[1]} information.`;
-        } else if (changed.length === 3) {
-            summary = `User updated their personal, employment, and government information.`;
         }
 
         try {
+            const existing = await apiRequest<any>('/employees/me');
             await apiRequest('/employees/me', {
                 method: 'PUT',
                 body: JSON.stringify({
@@ -603,11 +766,11 @@ const ProfileTab = ({ user, onSaved }: { user: any; onSaved?: () => void }) => {
                     city:             form.city           || null,
                     province:         form.province       || null,
                     zipCode:          form.zipCode        || null,
-                    sssNumber:        form.sssNumber      || null,
-                    philHealthNumber: form.philHealthNumber || null,
-                    pagIbigNumber:    form.pagIbigNumber  || null,
-                    tinNumber:        form.tinNumber      || null,
                     isActive:         form.employmentStatus === 'Active',
+                    sssNumber:        existing.sssNumber        || null,
+                    philHealthNumber: existing.philHealthNumber || null,
+                    pagIbigNumber:    existing.pagIbigNumber    || null,
+                    tinNumber:        existing.tinNumber        || null,
                 }),
             });
 
@@ -631,7 +794,7 @@ const ProfileTab = ({ user, onSaved }: { user: any; onSaved?: () => void }) => {
 
     const inputClass = isEditing
         ? 'pro-input w-full'
-        : 'pro-input w-full bg-gray-50 text-gray-400 cursor-not-allowed';
+        : 'pro-input w-full bg-gray-50 !text-gray-400 cursor-not-allowed';
 
     const selectClass = isEditing
         ? 'pro-input w-full'
@@ -705,8 +868,9 @@ const ProfileTab = ({ user, onSaved }: { user: any; onSaved?: () => void }) => {
 
                 {/* Name & position — below avatar on mobile */}
                 <div className="flex-1">
-                    <p className="text-sm font-semibold text-gray-800">{form.fullName || '—'}</p>
+                    <p className="text-[15px] font-semibold text-gray-800">{form.fullName || '—'}</p>
                     <p className="text-xs text-gray-400">{form.position || 'No position set'}</p>
+                    <p className="text-[12px] text-gray-800 mt-0.5">{user?.username ?? user?.email ?? '—'}</p>
                 </div>
 
                 {/* Edit button — only visible on desktop (far right) */}
@@ -733,19 +897,9 @@ const ProfileTab = ({ user, onSaved }: { user: any; onSaved?: () => void }) => {
                 <h3 className="text-sm font-semibold text-gray-700 mb-4">Personal information</h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
-                        <label className="block text-xs font-medium text-gray-500 mb-1">Full name</label>
-                        <input value={form.fullName} readOnly
-                            className="pro-input w-full text-gray-400 cursor-not-allowed" />
-                    </div>
-                    <div>
-                        <label className="block text-xs font-medium text-gray-500 mb-1">Email address</label>
-                        <input value={form.email} readOnly type="email"
-                            className="pro-input w-full bg-gray-50 text-gray-400 cursor-not-allowed" />
-                    </div>
-                    <div>
                         <label className="block text-xs font-medium text-gray-500 mb-1">Contact number</label>
                         <input name="contactNumber" value={form.contactNumber} onChange={handleChange}
-                            readOnly={!isEditing} className={inputClass} placeholder="+63 912 345 6789" />
+                            readOnly={!isEditing} className={inputClass} placeholder="+63 912 345 6789" maxLength={13} />
                     </div>
                     <div>
                         <label className="block text-xs font-medium text-gray-500 mb-1">Address line 1</label>
@@ -759,13 +913,29 @@ const ProfileTab = ({ user, onSaved }: { user: any; onSaved?: () => void }) => {
                     </div>
                     <div>
                         <label className="block text-xs font-medium text-gray-500 mb-1">City / Municipality</label>
-                        <input name="city" value={form.city} onChange={handleChange}
-                            readOnly={!isEditing} className={inputClass} placeholder="Manila" />
+                        <DropdownMenu
+                            value={form.city}
+                            options={cityOptions}
+                            placeholder={form.province ? 'Select city' : 'Select province first'}
+                            disabled={!isEditing}
+                            onSelect={value => { setForm(prev => ({ ...prev, city: value })); setOpenDropdown(null); }}
+                            open={openDropdown === 'city'}
+                            onToggle={() => setOpenDropdown(prev => prev === 'city' ? null : 'city')}
+                            onClose={() => setOpenDropdown(null)}
+                        />
                     </div>
                     <div>
                         <label className="block text-xs font-medium text-gray-500 mb-1">Province</label>
-                        <input name="province" value={form.province} onChange={handleChange}
-                            readOnly={!isEditing} className={inputClass} placeholder="Metro Manila" />
+                        <DropdownMenu
+                            value={form.province}
+                            options={PROVINCE_OPTIONS}
+                            placeholder="Select province"
+                            disabled={!isEditing}
+                            onSelect={handleProvinceSelect}
+                            open={openDropdown === 'province'}
+                            onToggle={() => setOpenDropdown(prev => prev === 'province' ? null : 'province')}
+                            onClose={() => setOpenDropdown(null)}
+                        />
                     </div>
                     <div>
                         <label className="block text-xs font-medium text-gray-500 mb-1">Zip code</label>
@@ -776,29 +946,30 @@ const ProfileTab = ({ user, onSaved }: { user: any; onSaved?: () => void }) => {
             </div>
 
             <div className="border-t border-gray-100" />
-{/* ── Employment Information ── */}
+            {/* ── Employment Information ── */}
             <div>
                 <h3 className="text-sm font-semibold text-gray-700 mb-4">Employment information</h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
                         <label className="block text-xs font-medium text-gray-500 mb-1">Position</label>
                         <input value={form.position} readOnly
-                            className="pro-input w-full bg-gray-50 text-gray-400 cursor-not-allowed" placeholder="e.g. Software Engineer" />
+                            className="w-full px-0 py-1.5 bg-transparent text-gray-500 text-sm border-0 outline-none cursor-default select-none" placeholder="e.g. Software Engineer" />
                     </div>
                     <div>
                         <label className="block text-xs font-medium text-gray-500 mb-1">Department</label>
                         <input value={form.department} readOnly
-                            className="pro-input w-full bg-gray-50 text-gray-400 cursor-not-allowed" placeholder="e.g. Engineering" />
+                            className="w-full px-0 py-1.5 bg-transparent text-gray-500 text-sm border-0 outline-none cursor-default select-none" placeholder="e.g. Engineering" />
                     </div>
                     <div>
                         <label className="block text-xs font-medium text-gray-500 mb-1">Employment type</label>
                         <input value={form.employmentType} readOnly
-                            className="pro-input w-full bg-gray-50 text-gray-400 cursor-not-allowed" placeholder="e.g. Regular" />
+                            className="w-full px-0 py-1.5 bg-transparent text-gray-500 text-sm border-0 outline-none cursor-default select-none" placeholder="e.g. Regular" />
                     </div>
                     <div>
                         <label className="block text-xs font-medium text-gray-500 mb-1">Employment status</label>
-                        <input value={form.employmentStatus} readOnly
-                            className="pro-input w-full bg-gray-50 text-gray-400 cursor-not-allowed" />
+                        <p className={`py-1.5 font-semibold text-sm ${form.employmentStatus === 'Active' ? 'text-green-500' : 'text-rose-500'}`}>
+                            {form.employmentStatus || '—'}
+                        </p>
                     </div>
                 </div>
                 <p className="mt-3 text-xs text-gray-400 flex items-center gap-1.5 italic">
@@ -807,17 +978,7 @@ const ProfileTab = ({ user, onSaved }: { user: any; onSaved?: () => void }) => {
                 </p>
             </div>
 
-            {/* ── Government Information (secure) ── */}
-            <GovernmentInfoSection
-                form={{
-                    sssNumber:        form.sssNumber,
-                    pagIbigNumber:    form.pagIbigNumber,
-                    philHealthNumber: form.philHealthNumber,
-                    tinNumber:        form.tinNumber,
-                }}
-                onChange={handleChange as (e: React.ChangeEvent<HTMLInputElement>) => void}
-                isEditing={isEditing}
-            />
+            
         </div>
     );
 };
@@ -831,6 +992,7 @@ const SecurityTab = ({ user, onSaved }: { user: any; onSaved?: () => void }) => 
     const [passwords,      setPasswords]      = useState({ current: '', newPass: '', confirm: '' });
     const [error,          setError]          = useState('');
     const [employeeNumber, setEmployeeNumber] = useState<string | null>(null);
+    const [hiredDate,      setHiredDate]      = useState<string | null>(null);
     const [confirmOpen,    setConfirmOpen]    = useState(false);
 
     useEffect(() => {
@@ -838,6 +1000,7 @@ const SecurityTab = ({ user, onSaved }: { user: any; onSaved?: () => void }) => 
             try {
                 const data = await apiRequest<any>('/employees/me');
                 setEmployeeNumber(data.employeeNumber ?? null);
+setHiredDate(data.dateHired ? new Date(data.dateHired).toLocaleDateString('en-PH', { year: 'numeric', month: 'long', day: 'numeric' }) : null);
             } catch {
                 setEmployeeNumber(null);
             }
@@ -897,23 +1060,29 @@ const SecurityTab = ({ user, onSaved }: { user: any; onSaved?: () => void }) => 
                     onCancel={() => setConfirmOpen(false)}
                 />
             )}
+
+            {/* ── Government Information (secure) ── */}
+            <GovernmentInfoSection onSaved={onSaved} />
+
+            <div className="border-t border-gray-100" />
+
             <div>
                 <h3 className="text-sm font-semibold text-gray-700 mb-3">Account information</h3>
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
                     <div>
                         <label className="block text-xs font-medium text-gray-500 mb-1">Employee ID</label>
                         <input value={employeeNumber ?? '—'} readOnly
-                            className="pro-input w-full bg-gray-50 text-gray-400 cursor-not-allowed" />
+                            className="w-full px-0 py-1.5 bg-transparent text-green-500 font-semibold text-sm border-0 outline-none cursor-default select-none" />
                     </div>
                     <div>
-                        <label className="block text-xs font-medium text-gray-500 mb-1">Username</label>
-                        <input value={user?.username ?? user?.email ?? '—'} readOnly
-                            className="pro-input w-full bg-gray-50 text-gray-400 cursor-not-allowed" />
+                        <label className="block text-xs font-medium text-gray-500 mb-1">Hired date</label>
+                        <input value={hiredDate ?? '—'} readOnly
+                            className="w-full px-0 py-1.5 bg-transparent text-green-500 font-semibold text-sm border-0 outline-none cursor-default select-none" />
                     </div>
                     <div>
                         <label className="block text-xs font-medium text-gray-500 mb-1">Role</label>
                         <input value={user?.role ?? '—'} readOnly
-                            className="pro-input w-full bg-gray-50 text-gray-400 cursor-not-allowed" />
+                            className="w-full px-0 py-1.5 bg-transparent text-green-500 font-semibold text-sm border-0 outline-none cursor-default select-none" />
                     </div>
                     <div>
                     </div>
@@ -1264,7 +1433,10 @@ const ActivityLogTab = ({ refreshKey }: { refreshKey: number }) => {
 
 const UserSettings = () => {
     const { user } = useAuth();
-    const [activeTab,      setActiveTab]      = useState<SettingsTab>('profile');
+    const [activeTab,      setActiveTab]      = useState<SettingsTab>(() => {
+        const saved = localStorage.getItem('settings.activeTab');
+        return (saved as SettingsTab) ?? 'profile';
+    });
     const [logRefreshKey,  setLogRefreshKey]  = useState(0);
 
     const triggerLogRefresh = () => setLogRefreshKey(k => k + 1);
@@ -1282,8 +1454,8 @@ const UserSettings = () => {
                         <div className="pro-tabs">
                             {tabs.map(tab => (
                                 <button
-                                    key={tab.id}
-                                    onClick={() => setActiveTab(tab.id)}
+                                key={tab.id}
+                                onClick={() => { setActiveTab(tab.id); localStorage.setItem('settings.activeTab', tab.id); }}
                                     className={`pro-tab flex items-center gap-2 whitespace-nowrap shrink-0 w-auto !flex-none` + (activeTab === tab.id ? ' active' : '')}
                                 >
                                     <tab.icon className="w-4 h-4" />

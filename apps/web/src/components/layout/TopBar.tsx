@@ -62,6 +62,24 @@ const TopBar = ({ onMenuClick }: TopBarProps) => {
       : "Unknown Role";
 
   const displayInitial = displayName?.charAt(0)?.toUpperCase() || "U";
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!user?.id) {
+      setAvatarUrl(null);
+      return;
+    }
+    const saved = localStorage.getItem(`settings.avatar.${user.id}`);
+    setAvatarUrl(saved ?? null);
+
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === `settings.avatar.${user.id}`) {
+        setAvatarUrl(e.newValue);
+      }
+    };
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
+  }, [user?.id]);
 
   const [activeEmployees, setActiveEmployees] = useState<number>(0);
 
@@ -440,8 +458,14 @@ const TopBar = ({ onMenuClick }: TopBarProps) => {
         </div>
 
         <div className="flex items-center gap-3 pl-4 border-l border-gray-200">
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-emerald-500 to-emerald-600 flex items-center justify-center text-white text-sm font-bold shadow-sm">
-            {displayInitial}
+          <div className="w-9 h-9 rounded-xl overflow-hidden shrink-0 shadow-sm">
+            {avatarUrl ? (
+              <img src={avatarUrl} alt="Avatar" className="w-full h-full object-cover" />
+            ) : (
+              <div className="w-full h-full bg-gradient-to-br from-emerald-500 to-emerald-600 flex items-center justify-center text-white text-sm font-bold">
+                {displayInitial}
+              </div>
+            )}
           </div>
 
           <div className="hidden xl:block">
